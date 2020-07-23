@@ -1,128 +1,320 @@
-import React, { PureComponent } from 'react';
-import { Image, View, Text } from 'react-native';
-import PropTypes from 'prop-types';
+import React, { PureComponent } from "react";
+import { Image, View, Text, StyleSheet } from "react-native";
+import PropTypes from "prop-types";
+
+const defaultImageStyle = { resizeMode: "cover" };
+
+function attemptParseFloat(value) {
+  const result = parseFloat(value);
+  return Number.isNaN(result) ? null : result;
+}
+
+function normalizeSize(
+  dimension,
+  { containerDimension = null, enablePercentWidth = false } = {}
+) {
+  if (
+    dimension === null ||
+    dimension === undefined ||
+    Number.isNaN(dimension)
+  ) {
+    return null;
+  }
+  if (typeof dimension === "number") {
+    return dimension;
+  }
+  if (typeof dimension === "string") {
+    if (
+      dimension.search("%") !== -1 &&
+      enablePercentWidth &&
+      typeof containerDimension === "number"
+    ) {
+      const parsedFloat = attemptParseFloat(dimension);
+      if (Number.isNaN(parsedFloat)) {
+        return null;
+      }
+      return (parsedFloat * containerDimension) / 100;
+    } else if (dimension.trim().match(/^[\d.]+$/)) {
+      return attemptParseFloat(dimension);
+    }
+  }
+  return null;
+}
+
+function extractHorizontalSpace({ marginHorizontal, leftMargin, rightMargin, margin } = {}) {
+  const realLeftMargin = leftMargin || marginHorizontal || margin || 0;
+  const realRightMargin = rightMargin || marginHorizontal || margin || 0;
+  return realLeftMargin + realRightMargin;
+}
+
+function deriveRequiredDimensionsFromProps({
+  width,
+  height,
+  style,
+  enableExperimentalPercentWidth,
+  contentWidth,
+}) {
+  const normalizeOptionsWidth = {
+    enablePercentWidth: enableExperimentalPercentWidth,
+    containerDimension: contentWidth,
+  };
+  const normalizeOptionsHeight = {
+    enablePercentWidth: false,
+  };
+  const flatStyle = StyleSheet.flatten(style || {});
+  const styleWidth = normalizeSize(flatStyle.width, normalizeOptionsWidth);
+  const styleHeight = normalizeSize(flatStyle.height, normalizeOptionsHeight);
+  const widthProp = normalizeSize(width, normalizeOptionsWidth);
+  const heightProp = normalizeSize(height, normalizeOptionsHeight);
+  return {
+    width: typeof widthProp === "number" ? widthProp : styleWidth,
+    height: typeof heightProp === "number" ? heightProp : styleHeight,
+  };
+}
+
+function scaleUp(minDimensions, desiredDimensions) {
+  const aspectRatio = desiredDimensions.width / desiredDimensions.height;
+  if (desiredDimensions.width < minDimensions.width) {
+    return scaleUp(minDimensions, {
+      width: minDimensions.width,
+      height: minDimensions.width / aspectRatio,
+    });
+  }
+  if (desiredDimensions.height < minDimensions.height) {
+    return scaleUp(minDimensions, {
+      height: minDimensions.height,
+      width: minDimensions.height * aspectRatio,
+    });
+  }
+  return desiredDimensions;
+}
+
+function scaleDown(maxDimensions, desiredDimensions) {
+  const aspectRatio = desiredDimensions.width / desiredDimensions.height;
+  if (desiredDimensions.width > maxDimensions.width) {
+    return scaleDown(maxDimensions, {
+      width: maxDimensions.width,
+      height: maxDimensions.width / aspectRatio,
+    });
+  }
+  if (desiredDimensions.height > maxDimensions.height) {
+    return scaleDown(maxDimensions, {
+      height: maxDimensions.height,
+      width: maxDimensions.height * aspectRatio,
+    });
+  }
+  return desiredDimensions;
+}
+
+function scale({ minBox, maxBox }, originalBox) {
+  return scaleDown(maxBox, scaleUp(minBox, originalBox))
+}
+
+function sourcesAreEqual(source1, source2) {
+  return (
+    (source1 && source2 && source1.uri === source2.uri) || source1 === source2
+  );
+}
+
+function identity(arg) {
+  return arg;
+}
 
 export default class HTMLImage extends PureComponent {
-    constructor (props) {
-        super(props);
-        this.state = {
-            width: props.imagesInitialDimensions.width,
-            height: props.imagesInitialDimensions.height
-        };
+  constructor(props) {
+    super(props);
+    const requirements = deriveRequiredDimensionsFromProps(props);
+    this.state = {
+      imagePhysicalWidth: null,
+      imagePhysicalHeight: null,
+      requiredWidth: requirements.width,
+      requiredHeight: requirements.height,
+    };
+  }
+
+  static propTypes = {
+    source: PropTypes.object.isRequired,
+    alt: PropTypes.string,
+    height: PropTypes.oneOfType([PropTypes.string, PropTypes.number]),
+    width: PropTypes.oneOfType([PropTypes.string, PropTypes.number]),
+    style: PropTypes.oneOfType([PropTypes.object, PropTypes.array]),
+    computeImagesMaxWidth: PropTypes.func.isRequired,
+    contentWidth: PropTypes.number,
+    enableExperimentalPercentWidth: PropTypes.bool,
+    imagesInitialDimensions: PropTypes.shape({
+      width: PropTypes.number,
+      height: PropTypes.number,
+    }),
+  };
+
+  static defaultProps = {
+    enableExperimentalPercentWidth: false,
+    computeImagesMaxWidth: identity,
+    imagesInitialDimensions: {
+      width: 100,
+      height: 100,
+    },
+  };
+
+  componentDidMount() {
+    this.mounted = true;
+    if (this.state.requiredWidth == null || this.state.requiredHeight == null) {
+      this.fetchPhysicalImageDimensions();
     }
+  }
 
-    static propTypes = {
-        source: PropTypes.object.isRequired,
-        alt: PropTypes.string,
-        height: PropTypes.oneOfType([PropTypes.string, PropTypes.number]),
-        width: PropTypes.oneOfType([PropTypes.string, PropTypes.number]),
-        style: PropTypes.oneOfType([PropTypes.object, PropTypes.array]),
-        imagesMaxWidth: PropTypes.number,
-        imagesInitialDimensions: PropTypes.shape({
-            width: PropTypes.number,
-            height: PropTypes.number
-        })
+  componentWillUnmount() {
+    this.mounted = false;
+  }
+
+  componentDidUpdate(prevProps) {
+    let requirements = null;
+    const sourceHasChanged = !sourcesAreEqual(
+      prevProps.source,
+      this.props.source
+    );
+    const requirementsHaveChanged =
+      prevProps.width !== this.props.width ||
+      prevProps.height !== this.props.height ||
+      prevProps.style !== this.props.style;
+    if (requirementsHaveChanged) {
+      requirements = deriveRequiredDimensionsFromProps(this.props);
+      this.setState({
+        requiredWidth: requirements.width,
+        requiredHeight: requirements.height
+      });
     }
-
-    static defaultProps = {
-        imagesInitialDimensions: {
-            width: 100,
-            height: 100
-        }
+    if (sourceHasChanged) {
+      if (!requirements) {
+        requirements = deriveRequiredDimensionsFromProps(this.props);
+      }
+      if (
+        requirements.width === null ||
+        requirements.height === null
+      ) {
+        this.fetchPhysicalImageDimensions();
+      }
     }
+  }
 
-    componentDidMount () {
-        this.mounted = true;
-        this.getImageSize();
+  getImageBoxDimensions() {
+    const { computeImagesMaxWidth, contentWidth, style = {} } = this.props;
+    const flattenStyles = StyleSheet.flatten(style);
+    const horizontalSpace = extractHorizontalSpace(flattenStyles);
+    const { maxWidth = Infinity, maxHeight = Infinity, minWidth = 0, minHeight = 0 } = flattenStyles;
+    const imagesMaxWidth =
+      typeof contentWidth === "number"
+        ? computeImagesMaxWidth(contentWidth)
+        : Infinity;
+    const {
+      imagePhysicalWidth,
+      imagePhysicalHeight,
+      requiredWidth,
+      requiredHeight,
+    } = this.state;
+    const minBox = {
+      width: minWidth,
+      height: minHeight
     }
-
-    componentWillUnmount () {
-        this.mounted = false;
+    const maxBox = {
+      width: Math.min(
+        imagesMaxWidth,
+        maxWidth,
+        typeof requiredWidth === "number" ? requiredWidth : Infinity
+      ) - horizontalSpace,
+      height: Math.min(
+        typeof requiredHeight === "number" ? requiredHeight : Infinity,
+        maxHeight
+      ),
+    };
+    if (
+      typeof requiredWidth === "number" &&
+      typeof requiredHeight === "number"
+    ) {
+      return scale({ minBox, maxBox }, {
+        width: requiredWidth,
+        height: requiredHeight,
+      });
     }
-
-    componentDidUpdate(prevProps, prevState) {
-        this.getImageSize(this.props);
+    if (imagePhysicalWidth != null && imagePhysicalHeight != null) {
+      return scale({ minBox, maxBox }, {
+        width: imagePhysicalWidth,
+        height: imagePhysicalHeight,
+      });
     }
+    return null;
+  }
 
-    getDimensionsFromStyle (style, height, width) {
-        let styleWidth;
-        let styleHeight;
+  fetchPhysicalImageDimensions(props = this.props) {
+    const { source } = props;
+    Image.getSize(
+      source.uri,
+      (imagePhysicalWidth, imagePhysicalHeight) => {
+        this.mounted &&
+          this.setState({
+            imagePhysicalWidth,
+            imagePhysicalHeight,
+            error: false,
+          });
+      },
+      () => {
+        this.mounted && this.setState({ error: true });
+      }
+    );
+  }
 
-        if (height) {
-            styleHeight = height;
-        }
-        if (width) {
-            styleWidth = width;
-        }
-        if (Array.isArray(style)) {
-            style.forEach((styles) => {
-                if (!width && styles['width']) {
-                    styleWidth = styles['width'];
-                }
-                if (!height && styles['height']) {
-                    styleHeight = styles['height'];
-                }
-            });
-        } else {
-            if (!width && style['width']) {
-                styleWidth = style['width'];
-            }
-            if (!height && style['height']) {
-                styleHeight = style['height'];
-            }
-        }
+  renderImage(imageBox) {
+    const { source, style } = this.props;
+    return (
+      <Image
+        source={source}
+        style={[defaultImageStyle, style, imageBox]}
+        testID="image-layout"
+      />
+    );
+  }
 
-        return { styleWidth, styleHeight };
+  renderAlt() {
+    return (
+      <View
+        style={{
+          width: 50,
+          height: 50,
+          borderWidth: 1,
+          borderColor: "lightgray",
+          overflow: "hidden",
+          justifyContent: "center",
+        }}
+        testID="image-error"
+      >
+        {this.props.alt ? (
+          <Text style={{ textAlign: "center", fontStyle: "italic" }}>
+            {this.props.alt}
+          </Text>
+        ) : (
+          false
+        )}
+      </View>
+    );
+  }
+
+  renderPlaceholder() {
+    return (
+      <View
+        style={this.props.imagesInitialDimensions}
+        testID="image-placeholder"
+      />
+    );
+  }
+
+  render() {
+    const imageBox = this.getImageBoxDimensions();
+    if (this.state.error) {
+      return this.renderAlt();
     }
-
-    getImageSize (props = this.props) {
-        const { source, imagesMaxWidth, style, height, width } = props;
-        const { styleWidth, styleHeight } = this.getDimensionsFromStyle(style, height, width);
-
-        if (styleWidth && styleHeight) {
-            return this.mounted && this.setState({
-                width: typeof styleWidth === 'string' && styleWidth.search('%') !== -1 ? styleWidth : parseInt(styleWidth, 10),
-                height: typeof styleHeight === 'string' && styleHeight.search('%') !== -1 ? styleHeight : parseInt(styleHeight, 10)
-            });
-        }
-        // Fetch image dimensions only if they aren't supplied or if with or height is missing
-        Image.getSize(
-            source.uri,
-            (originalWidth, originalHeight) => {
-                if (!imagesMaxWidth) {
-                    return this.mounted && this.setState({ width: originalWidth, height: originalHeight });
-                }
-                const optimalWidth = imagesMaxWidth <= originalWidth ? imagesMaxWidth : originalWidth;
-                const optimalHeight = (optimalWidth * originalHeight) / originalWidth;
-                this.mounted && this.setState({ width: optimalWidth, height: optimalHeight, error: false });
-            },
-            () => {
-                this.mounted && this.setState({ error: true });
-            }
-        );
+    if (imageBox === null) {
+      return this.renderPlaceholder();
     }
-
-    validImage (source, style, props = {}) {
-        return (
-            <Image
-              source={source}
-              style={[style, { width: this.state.width, height: this.state.height, resizeMode: 'cover' }]}
-              {...props}
-            />
-        );
-    }
-
-    get errorImage () {
-        return (
-            <View style={{ width: 50, height: 50, borderWidth: 1, borderColor: 'lightgray', overflow: 'hidden', justifyContent: 'center' }}>
-                { this.props.alt ? <Text style={{ textAlign: 'center', fontStyle: 'italic' }}>{ this.props.alt }</Text> : false }
-            </View>
-        );
-    }
-
-    render () {
-        const { source, style, passProps } = this.props;
-
-        return !this.state.error ? this.validImage(source, style, passProps) : this.errorImage;
-    }
+    return this.renderImage(imageBox);
+  }
 }

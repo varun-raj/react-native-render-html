@@ -85,10 +85,6 @@ declare module "react-native-render-html" {
        */
       allowFontScaling?: boolean;
       /**
-       * Resize your images to this maximum width.
-       */
-      imagesMaxWidth?: number;
-      /**
        * Your custom renderers.
        */
       renderers?: RendererDictionary<P>;
@@ -117,6 +113,19 @@ declare module "react-native-render-html" {
        * Default width and height to display while image's dimensions are being retrieved.
        */
       imagesInitialDimensions?: ImageDimensions;
+      /**
+       * The width of the HTML content to display. The recommended practice
+       * is to pass `useWindowDimensions().width` minus any padding or margins.
+       */
+      contentWidth?: number;
+      /**
+       * A function which takes contentWidth as argument and returns a new width. Can return Infinity to denote unconstrained widths.
+       */
+      computeImagesMaxWidth?: number;
+      /**
+       * Support for relative percent-widths. Currently, it only works for images.
+       */
+      enableExperimentalPercentWidth?: number;
       /**
        * Fired with the event, the href and an object with all attributes of the tag as its arguments when tapping a link
        */
