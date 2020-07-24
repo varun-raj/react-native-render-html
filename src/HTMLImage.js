@@ -3,6 +3,20 @@ import { Image, View, Text, StyleSheet } from "react-native";
 import PropTypes from "prop-types";
 
 const defaultImageStyle = { resizeMode: "cover" };
+const emptyObject = {};
+
+const styles = StyleSheet.create({
+  image: { resizeMode: "cover" },
+  errorBox: {
+    width: 50,
+    height: 50,
+    borderWidth: 1,
+    borderColor: "lightgray",
+    overflow: "hidden",
+    justifyContent: "center",
+  },
+  errorText: { textAlign: "center", fontStyle: "italic" }
+});
 
 function attemptParseFloat(value) {
   const result = parseFloat(value);
@@ -41,7 +55,12 @@ function normalizeSize(
   return null;
 }
 
-function extractHorizontalSpace({ marginHorizontal, leftMargin, rightMargin, margin } = {}) {
+function extractHorizontalSpace({
+  marginHorizontal,
+  leftMargin,
+  rightMargin,
+  margin,
+} = {}) {
   const realLeftMargin = leftMargin || marginHorizontal || margin || 0;
   const realRightMargin = rightMargin || marginHorizontal || margin || 0;
   return realLeftMargin + realRightMargin;
@@ -50,18 +69,17 @@ function extractHorizontalSpace({ marginHorizontal, leftMargin, rightMargin, mar
 function deriveRequiredDimensionsFromProps({
   width,
   height,
-  style,
-  enableExperimentalPercentWidth,
+  enablePercentWidth,
   contentWidth,
+  flatStyle,
 }) {
   const normalizeOptionsWidth = {
-    enablePercentWidth: enableExperimentalPercentWidth,
+    enablePercentWidth,
     containerDimension: contentWidth,
   };
   const normalizeOptionsHeight = {
     enablePercentWidth: false,
   };
-  const flatStyle = StyleSheet.flatten(style || {});
   const styleWidth = normalizeSize(flatStyle.width, normalizeOptionsWidth);
   const styleHeight = normalizeSize(flatStyle.height, normalizeOptionsHeight);
   const widthProp = normalizeSize(width, normalizeOptionsWidth);
@@ -107,7 +125,7 @@ function scaleDown(maxDimensions, desiredDimensions) {
 }
 
 function scale({ minBox, maxBox }, originalBox) {
-  return scaleDown(maxBox, scaleUp(minBox, originalBox))
+  return scaleDown(maxBox, scaleUp(minBox, originalBox));
 }
 
 function sourcesAreEqual(source1, source2) {
@@ -120,15 +138,81 @@ function identity(arg) {
   return arg;
 }
 
+function computeImageBoxDimensions(params) {
+  const {
+    computeImagesMaxWidth,
+    contentWidth,
+    flattenStyles,
+    imagePhysicalWidth,
+    imagePhysicalHeight,
+    requiredWidth,
+    requiredHeight,
+  } = params;
+  const horizontalSpace = extractHorizontalSpace(flattenStyles);
+  const {
+    maxWidth = Infinity,
+    maxHeight = Infinity,
+    minWidth = 0,
+    minHeight = 0,
+  } = flattenStyles;
+  const imagesMaxWidth =
+    typeof contentWidth === "number"
+      ? computeImagesMaxWidth(contentWidth)
+      : Infinity;
+  const minBox = {
+    width: minWidth,
+    height: minHeight,
+  };
+  const maxBox = {
+    width:
+      Math.min(
+        imagesMaxWidth,
+        maxWidth,
+        typeof requiredWidth === "number" ? requiredWidth : Infinity
+      ) - horizontalSpace,
+    height: Math.min(
+      typeof requiredHeight === "number" ? requiredHeight : Infinity,
+      maxHeight
+    ),
+  };
+  if (typeof requiredWidth === "number" && typeof requiredHeight === "number") {
+    return scale(
+      { minBox, maxBox },
+      {
+        width: requiredWidth,
+        height: requiredHeight,
+      }
+    );
+  }
+  if (imagePhysicalWidth != null && imagePhysicalHeight != null) {
+    return scale(
+      { minBox, maxBox },
+      {
+        width: imagePhysicalWidth,
+        height: imagePhysicalHeight,
+      }
+    );
+  }
+  return null;
+}
+
 export default class HTMLImage extends PureComponent {
+  __cachedFlattenStyles = null;
+  __cachedRequirements = null;
+
   constructor(props) {
     super(props);
-    const requirements = deriveRequiredDimensionsFromProps(props);
-    this.state = {
+    this.invalidateRequirements(props);
+    const state = {
       imagePhysicalWidth: null,
       imagePhysicalHeight: null,
-      requiredWidth: requirements.width,
-      requiredHeight: requirements.height,
+      requiredWidth: this.__cachedRequirements.width,
+      requiredHeight: this.__cachedRequirements.height,
+      imageBoxDimensions: null,
+    };
+    this.state = {
+      ...state,
+      imageBoxDimensions: this.computeImageBoxDimensions(props, state),
     };
   }
 
@@ -156,6 +240,45 @@ export default class HTMLImage extends PureComponent {
     },
   };
 
+  invalidateRequirements(props) {
+    const {
+      width,
+      height,
+      contentWidth,
+      enableExperimentalPercentWidth,
+      style
+    } = props;
+    this.__cachedFlattenStyles =
+      StyleSheet.flatten(style) || emptyObject;
+    this.__cachedRequirements = deriveRequiredDimensionsFromProps({
+      width,
+      height,
+      contentWidth,
+      enablePercentWidth: enableExperimentalPercentWidth,
+      flatStyle: this.__cachedFlattenStyles,
+    });
+  }
+
+  computeImageBoxDimensions(props, state) {
+    const { computeImagesMaxWidth, contentWidth } = props;
+    const {
+      imagePhysicalWidth,
+      imagePhysicalHeight,
+      requiredWidth,
+      requiredHeight,
+    } = state;
+    const imageBoxDimensions = computeImageBoxDimensions({
+      flattenStyles: this.__cachedFlattenStyles,
+      computeImagesMaxWidth,
+      contentWidth,
+      imagePhysicalWidth,
+      imagePhysicalHeight,
+      requiredWidth,
+      requiredHeight,
+    });
+    return imageBoxDimensions;
+  }
+
   componentDidMount() {
     this.mounted = true;
     if (this.state.requiredWidth == null || this.state.requiredHeight == null) {
@@ -167,8 +290,7 @@ export default class HTMLImage extends PureComponent {
     this.mounted = false;
   }
 
-  componentDidUpdate(prevProps) {
-    let requirements = null;
+  componentDidUpdate(prevProps, prevState) {
     const sourceHasChanged = !sourcesAreEqual(
       prevProps.source,
       this.props.source
@@ -177,77 +299,38 @@ export default class HTMLImage extends PureComponent {
       prevProps.width !== this.props.width ||
       prevProps.height !== this.props.height ||
       prevProps.style !== this.props.style;
+    const shouldRecomputeImageBox =
+      requirementsHaveChanged ||
+      this.state.imagePhysicalWidth !== prevState.imagePhysicalWidth ||
+      this.state.imagePhysicalHeight !== prevState.imagePhysicalHeight ||
+      this.props.contentWidth !== prevProps.contentWidth ||
+      this.props.computeImagesMaxWidth !== prevProps.computeImagesMaxWidth;
+
     if (requirementsHaveChanged) {
-      requirements = deriveRequiredDimensionsFromProps(this.props);
+      this.invalidateRequirements(this.props);
       this.setState({
-        requiredWidth: requirements.width,
-        requiredHeight: requirements.height
+        requiredWidth: this.__cachedRequirements.width,
+        requiredHeight: this.__cachedRequirements.height,
       });
     }
     if (sourceHasChanged) {
-      if (!requirements) {
-        requirements = deriveRequiredDimensionsFromProps(this.props);
-      }
       if (
-        requirements.width === null ||
-        requirements.height === null
+        this.__cachedRequirements.width === null ||
+        this.__cachedRequirements.height === null
       ) {
         this.fetchPhysicalImageDimensions();
       }
     }
-  }
-
-  getImageBoxDimensions() {
-    const { computeImagesMaxWidth, contentWidth, style = {} } = this.props;
-    const flattenStyles = StyleSheet.flatten(style);
-    const horizontalSpace = extractHorizontalSpace(flattenStyles);
-    const { maxWidth = Infinity, maxHeight = Infinity, minWidth = 0, minHeight = 0 } = flattenStyles;
-    const imagesMaxWidth =
-      typeof contentWidth === "number"
-        ? computeImagesMaxWidth(contentWidth)
-        : Infinity;
-    const {
-      imagePhysicalWidth,
-      imagePhysicalHeight,
-      requiredWidth,
-      requiredHeight,
-    } = this.state;
-    const minBox = {
-      width: minWidth,
-      height: minHeight
+    if (shouldRecomputeImageBox) {
+      this.setState((state, props) => ({
+        imageBoxDimensions: this.computeImageBoxDimensions(props, state),
+      }));
     }
-    const maxBox = {
-      width: Math.min(
-        imagesMaxWidth,
-        maxWidth,
-        typeof requiredWidth === "number" ? requiredWidth : Infinity
-      ) - horizontalSpace,
-      height: Math.min(
-        typeof requiredHeight === "number" ? requiredHeight : Infinity,
-        maxHeight
-      ),
-    };
-    if (
-      typeof requiredWidth === "number" &&
-      typeof requiredHeight === "number"
-    ) {
-      return scale({ minBox, maxBox }, {
-        width: requiredWidth,
-        height: requiredHeight,
-      });
-    }
-    if (imagePhysicalWidth != null && imagePhysicalHeight != null) {
-      return scale({ minBox, maxBox }, {
-        width: imagePhysicalWidth,
-        height: imagePhysicalHeight,
-      });
-    }
-    return null;
   }
 
   fetchPhysicalImageDimensions(props = this.props) {
     const { source } = props;
-    Image.getSize(
+    source && source.uri && Image.getSize(
       source.uri,
       (imagePhysicalWidth, imagePhysicalHeight) => {
         this.mounted &&
@@ -263,12 +346,12 @@ export default class HTMLImage extends PureComponent {
     );
   }
 
-  renderImage(imageBox) {
+  renderImage(imageBoxDimensions) {
     const { source, style } = this.props;
     return (
       <Image
         source={source}
-        style={[defaultImageStyle, style, imageBox]}
+        style={[defaultImageStyle, style, imageBoxDimensions]}
         testID="image-layout"
       />
     );
@@ -277,18 +360,11 @@ export default class HTMLImage extends PureComponent {
   renderAlt() {
     return (
       <View
-        style={{
-          width: 50,
-          height: 50,
-          borderWidth: 1,
-          borderColor: "lightgray",
-          overflow: "hidden",
-          justifyContent: "center",
-        }}
+        style={styles.errorBox}
         testID="image-error"
       >
         {this.props.alt ? (
-          <Text style={{ textAlign: "center", fontStyle: "italic" }}>
+          <Text style={styles.errorText}>
             {this.props.alt}
           </Text>
         ) : (
@@ -308,13 +384,13 @@ export default class HTMLImage extends PureComponent {
   }
 
   render() {
-    const imageBox = this.getImageBoxDimensions();
-    if (this.state.error) {
+    const { error, imageBoxDimensions } = this.state;
+    if (error) {
       return this.renderAlt();
     }
-    if (imageBox === null) {
+    if (imageBoxDimensions === null) {
       return this.renderPlaceholder();
     }
-    return this.renderImage(imageBox);
+    return this.renderImage(imageBoxDimensions);
   }
 }
